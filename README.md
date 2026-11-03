@@ -1,36 +1,48 @@
-# DriftWatch Lite
-
-### Comparing PSI and KS Drift Detectors at Matched False-Alarm Rates
+# DriftWatch
 
 ## Overview
 
-DriftWatch Lite is a machine learning monitoring system
-that compares PSI (Population Stability Index) and
-the Kolmogorov-Smirnov test for detecting data drift.
+DriftWatch is a model-agnostic framework for monitoring data drift and comparing two statistical drift-detection methods: Population Stability Index (PSI) and the Kolmogorov–Smirnov (KS) two-sample test.
 
-The project evaluates both detectors at matched
-false-alarm rates and investigates whether detected
-distribution changes correspond to declining model accuracy.
+The project uses the UCI Bike Sharing hourly dataset as its initial use case. It is designed to compare how effectively PSI and KS identify changes in incoming feature distributions while monitoring different machine-learning models.
+
+Feature drift and model performance degradation are evaluated separately: a change in input data does not necessarily mean that prediction performance has worsened.
 
 ## Objectives
 
-- Train a baseline Random Forest model.
-- Simulate controlled data drift.
-- Implement PSI and KS detectors.
-- Calibrate thresholds at a target 5% false-alarm rate.
-- Compare detection delay and detection rates.
-- Visualize results using Streamlit.
+- Implement PSI- and KS-based data drift detection.
+- Design the detection layer independently of the machine-learning model.
+- Support multiple classification models through a common interface.
+- Calibrate detector thresholds using a separate calibration dataset.
+- Compare detection rate, false-alarm rate, and detection delay.
+- Examine the relationship between detected feature drift and model performance.
+- Present monitoring results through a dashboard.
 
 ## Tech Stack
 
-- Python
-- NumPy and Pandas
-- Scikit-learn
-- SciPy
-- Streamlit
-- Plotly
-- Pytest
+| Component | Technology |
+|---|---|
+| Programming language | Python |
+| Data processing | Pandas, NumPy |
+| Machine learning | Scikit-learn |
+| Statistical testing | SciPy |
+| Dashboard | Streamlit |
+| Development environment | VS Code |
+| Version control | Git and GitHub |
 
-## Status
+## Current Status
 
-Under development.
+**In progress — initial data preparation**
+
+- [x] Dataset downloaded and inspected.
+- [x] Feature selection and target definition established.
+- [x] Reference, calibration, and natural-evaluation split implemented.
+- [x] Initial data diagnostics implemented.
+- [ ] Baseline model training (Random Forest, SVM, Logistic Regression).
+- [ ] Drift simulation.
+- [ ] PSI and KS detector implementation.
+- [ ] Threshold calibration and comparative experiments.
+- [ ] Monitoring pipeline, alerts, and Streamlit dashboard.
+- [ ] Testing and final evaluation.
+
+The current implementation focuses on establishing a reliable data-preparation workflow. The remaining components will be developed and integrated in subsequent stages.
