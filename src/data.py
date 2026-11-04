@@ -1,4 +1,24 @@
+"""
+DriftWatch - data preparation (src/data.py)
 
+Partitions (all splits are by whole dates, never by rows):
+
+  Historical pool = first 60% of dates (Jan 2011 - mid Mar 2012)
+      reference     60% of the pool   -> model training + drift reference
+      calibration   20% of the pool   -> detector threshold calibration
+      stable_test   20% of the pool   -> no-drift control, base for simulated
+                                         drift, held-out accuracy
+  natural_eval    = last 40% of dates -> real, naturally drifted period
+                                         (demand grows strongly in 2012);
+                                         used only as a separate real-drift check
+
+Within the pool, dates are grouped into 7-day blocks and each calendar month
+is split separately (stratified), so reference, calibration and stable_test
+all cover the same seasons. Blocks (not single days) are used so neighbouring
+days with near-identical weather do not leak between partitions.
+"""
+
+import numpy as np
 import pandas as pd
 from pathlib import Path
 
@@ -7,15 +27,21 @@ from pathlib import Path
 # CONFIGURATION
 # ==================================================
 
-DATA_PATH = Path("data/raw/hour.csv")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_PATH = PROJECT_ROOT / "data" / "raw" / "hour.csv"
 
 RANDOM_STATE = 42
 
-REFERENCE_PERIOD_RATIO = 0.60
-CALIBRATION_RATIO = 0.20
+HISTORICAL_RATIO = 0.60     # share of dates in the historical pool
+CALIBRATION_RATIO = 0.20    # share of the pool used for calibration
+STABLE_TEST_RATIO = 0.20    # share of the pool used as stable test
+BLOCK_DAYS = 7              # block length used when splitting the pool
+
+BATCH_SIZE = 500            # rows per monitoring batch
 
 # yr is deliberately excluded because it becomes constant
 # in the later portion of this dataset.
+# cnt, casual and registered are excluded to avoid target leakage.
 FEATURE_COLUMNS = [
     "season",
     "mnth",
@@ -28,6 +54,13 @@ FEATURE_COLUMNS = [
     "atemp",
     "hum",
     "windspeed"
+]
+
+PARTITION_NAMES = [
+    "reference",
+    "calibration",
+    "stable_test",
+    "natural_eval"
 ]
 
 
@@ -60,70 +93,74 @@ def load_dataset():
 
 def split_dataset(df):
     """
-    Create three partitions:
+    Split the dataset into four partitions by whole dates.
 
-    1. Reference/training: approximately 48%
-    2. Calibration: approximately 12%
-    3. Natural evaluation: approximately 40%
-
-    Calibration dates are sampled from the initial
-    reference period, using a reproducible seed.
-
-    Splitting is performed by whole dates.
+    Returns a dict with keys:
+        reference, calibration, stable_test, natural_eval
     """
 
-    unique_dates = sorted(df["dteday"].unique())
+    dates = pd.Series(sorted(df["dteday"].unique()))
 
-    # First 60% of dates form the historical pool
-    reference_period_end = int(
-        len(unique_dates) * REFERENCE_PERIOD_RATIO
+    pool_end = int(len(dates) * HISTORICAL_RATIO)
+
+    pool_dates = dates.iloc[:pool_end]
+    natural_dates = dates.iloc[pool_end:]
+
+    # ---- group pool dates into 7-day blocks ----
+    blocks = pd.DataFrame({"date": pool_dates})
+
+    blocks["block"] = (
+        (blocks["date"] - blocks["date"].iloc[0]).dt.days
+        // BLOCK_DAYS
     )
 
-    reference_period_dates = unique_dates[
-        :reference_period_end
-    ]
-
-    # Remaining 40% are kept for chronological evaluation
-    evaluation_dates = unique_dates[
-        reference_period_end:
-    ]
-
-    # Sample 20% of historical dates for calibration
-    calibration_dates = pd.Series(
-        reference_period_dates
-    ).sample(
-        frac=CALIBRATION_RATIO,
-        random_state=RANDOM_STATE
-    ).tolist()
-
-    calibration_date_set = set(calibration_dates)
-
-    # Remaining historical dates form reference data
-    reference_dates = [
-        date for date in reference_period_dates
-        if date not in calibration_date_set
-    ]
-
-    reference_date_set = set(reference_dates)
-    evaluation_date_set = set(evaluation_dates)
-
-    reference_df = df[
-        df["dteday"].isin(reference_date_set)
-    ].copy()
-
-    calibration_df = df[
-        df["dteday"].isin(calibration_date_set)
-    ].copy()
-
-    evaluation_df = df[
-        df["dteday"].isin(evaluation_date_set)
-    ].copy()
-
-    return (
-        reference_df.reset_index(drop=True),
-        calibration_df.reset_index(drop=True),
-        evaluation_df.reset_index(drop=True)
+    block_info = (
+        blocks.groupby("block")["date"]
+        .min()
+        .dt.to_period("M")
+        .rename("month_key")
+        .reset_index()
     )
+
+    # ---- split each month's blocks (stratified by month) ----
+    rng = np.random.default_rng(RANDOM_STATE)
+
+    block_partition = {}
+
+    for _, month_blocks in block_info.groupby("month_key"):
+
+        block_ids = rng.permutation(
+            sorted(month_blocks["block"].tolist())
+        )
+
+        n = len(block_ids)
+        n_cal = int(round(n * CALIBRATION_RATIO))
+        n_test = int(round(n * STABLE_TEST_RATIO))
+
+        for block_id in block_ids[:n_cal]:
+            block_partition[block_id] = "calibration"
+
+        for block_id in block_ids[n_cal:n_cal + n_test]:
+            block_partition[block_id] = "stable_test"
+
+        for block_id in block_ids[n_cal + n_test:]:
+            block_partition[block_id] = "reference"
+
+    blocks["partition"] = blocks["block"].map(block_partition)
+
+    date_to_partition = dict(
+        zip(blocks["date"], blocks["partition"])
+    )
+
+    for date in natural_dates:
+        date_to_partition[date] = "natural_eval"
+
+    partition_per_row = df["dteday"].map(date_to_partition)
+
+    return {
+        name: df[partition_per_row == name].reset_index(drop=True)
+        for name in PARTITION_NAMES
+    }
 
 
 # ==================================================
@@ -157,137 +194,168 @@ def prepare_data():
 
     The target threshold is calculated using reference
     data only and reused across all partitions.
+
+    Returns a dict with X_/y_ pairs for: train, calibration,
+    stable_test, evaluation (natural), plus target_median.
     """
 
     df = load_dataset()
 
-    (
-        reference_df,
-        calibration_df,
-        evaluation_df
-    ) = split_dataset(df)
+    partitions = split_dataset(df)
 
     # Target threshold from reference data only
-    target_median = reference_df["cnt"].median()
+    target_median = partitions["reference"]["cnt"].median()
 
-    # Reference / model training data
-    X_train, y_train = prepare_features(
-        reference_df,
-        target_median
-    )
-
-    # Calibration data
-    X_calibration, y_calibration = prepare_features(
-        calibration_df,
-        target_median
-    )
-
-    # Natural chronological evaluation data
-    X_evaluation, y_evaluation = prepare_features(
-        evaluation_df,
-        target_median
-    )
-
-    return {
-        "X_train": X_train,
-        "y_train": y_train,
-
-        "X_calibration": X_calibration,
-        "y_calibration": y_calibration,
-
-        "X_evaluation": X_evaluation,
-        "y_evaluation": y_evaluation,
-
-        "target_median": target_median
+    names = {
+        "reference": "train",
+        "calibration": "calibration",
+        "stable_test": "stable_test",
+        "natural_eval": "evaluation"
     }
 
+    data = {}
 
-# ==================================================
-# 5. TEMPORAL DIAGNOSTICS
-# ==================================================
+    for partition_name, short_name in names.items():
 
-def display_temporal_diagnostics(
-    reference_df,
-    calibration_df,
-    evaluation_df,
-    target_median
-):
-    """Display partition dates and demand distributions."""
-
-    print("\n========== TEMPORAL DIAGNOSTICS ==========")
-
-    partitions = [
-        ("Reference / Training", reference_df),
-        ("Calibration", calibration_df),
-        ("Natural Evaluation", evaluation_df)
-    ]
-
-    print("\nPartition date ranges:")
-
-    for name, partition in partitions:
-
-        print(
-            f"{name}: "
-            f"{partition['dteday'].min()} to "
-            f"{partition['dteday'].max()}"
+        X, y = prepare_features(
+            partitions[partition_name],
+            target_median
         )
 
-    print("\nPartition sizes:")
+        data[f"X_{short_name}"] = X
+        data[f"y_{short_name}"] = y
 
-    for name, partition in partitions:
-        print(f"{name}: {len(partition)} records")
+    data["target_median"] = target_median
 
-    print("\nTarget threshold:", target_median)
-
-    print("\nHigh-demand percentage:")
-
-    for name, partition in partitions:
-
-        percentage = (
-            (partition["cnt"] > target_median).mean() * 100
-        )
-
-        print(f"{name}: {percentage:.2f}%")
+    return data
 
 
 # ==================================================
-# 6. FEATURE DISTRIBUTION COMPARISON
+# 5. BATCHING
 # ==================================================
 
-def compare_feature_distributions(
-    reference_df,
-    calibration_df
+def sample_batches(
+    X,
+    y,
+    n_batches,
+    batch_size=BATCH_SIZE,
+    seed=RANDOM_STATE
 ):
     """
-    Compare reference and calibration feature statistics.
+    Draw n_batches random batches (without replacement inside a
+    batch, independently between batches) from stable data.
+
+    Use this for calibration and for the no-drift control, where
+    many batches are needed from a limited amount of stable data.
+    Batches overlap, so treat them as a resampling scheme.
+
+    Returns a list of (X_batch, y_batch) tuples.
+    """
+
+    if batch_size > len(X):
+        raise ValueError(
+            f"batch_size ({batch_size}) is larger than the data ({len(X)})."
+        )
+
+    rng = np.random.default_rng(seed)
+
+    batches = []
+
+    for _ in range(n_batches):
+
+        idx = rng.choice(len(X), size=batch_size, replace=False)
+
+        batches.append((
+            X.iloc[idx].reset_index(drop=True),
+            y.iloc[idx].reset_index(drop=True)
+        ))
+
+    return batches
+
+
+def chronological_batches(X, y, batch_size=BATCH_SIZE):
+    """
+    Cut time-ordered data into consecutive batches (the incomplete
+    last batch is dropped). Use this for the natural evaluation set.
+
+    Returns a list of (X_batch, y_batch) tuples.
+    """
+
+    n_batches = len(X) // batch_size
+
+    return [
+        (
+            X.iloc[i * batch_size:(i + 1) * batch_size].reset_index(drop=True),
+            y.iloc[i * batch_size:(i + 1) * batch_size].reset_index(drop=True)
+        )
+        for i in range(n_batches)
+    ]
+
+
+# ==================================================
+# 6. TEMPORAL DIAGNOSTICS
+# ==================================================
+
+def display_temporal_diagnostics(partitions, target_median):
+    """Display partition dates, sizes and demand distributions."""
+
+    print("\n========== PARTITION DIAGNOSTICS ==========")
+
+    print("\nTarget threshold (reference median):", target_median)
+
+    for name in PARTITION_NAMES:
+
+        part = partitions[name]
+
+        high = (part["cnt"] > target_median).mean() * 100
+
+        print(
+            f"\n{name}: {len(part)} records, "
+            f"{part['dteday'].nunique()} days, "
+            f"{part['dteday'].min().date()} to "
+            f"{part['dteday'].max().date()}"
+        )
+        print(f"  mean cnt: {part['cnt'].mean():.1f}")
+        print(f"  high-demand: {high:.2f}%")
+
+    print("\nOverlap check (should all be 0):")
+
+    names = PARTITION_NAMES
+
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+
+            shared = set(partitions[names[i]]["dteday"]) & set(
+                partitions[names[j]]["dteday"]
+            )
+
+            print(f"  {names[i]} & {names[j]}: {len(shared)}")
+
+
+# ==================================================
+# 7. FEATURE DISTRIBUTION COMPARISON
+# ==================================================
+
+def compare_feature_distributions(partitions):
+    """
+    Compare feature means across partitions.
 
     This is a descriptive diagnostic, not a formal
     statistical drift test.
     """
 
-    print(
-        "\n========== FEATURE DISTRIBUTION COMPARISON =========="
-    )
+    print("\n========== FEATURE MEANS BY PARTITION ==========\n")
 
-    for feature in FEATURE_COLUMNS:
+    table = pd.DataFrame({
+        name: partitions[name][FEATURE_COLUMNS].mean()
+        for name in PARTITION_NAMES
+    })
 
-        reference_mean = reference_df[feature].mean()
-        calibration_mean = calibration_df[feature].mean()
-
-        reference_std = reference_df[feature].std()
-        calibration_std = calibration_df[feature].std()
-
-        print(f"\nFeature: {feature}")
-
-        print(f"Reference mean: {reference_mean:.4f}")
-        print(f"Calibration mean: {calibration_mean:.4f}")
-
-        print(f"Reference std: {reference_std:.4f}")
-        print(f"Calibration std: {calibration_std:.4f}")
+    print(table.round(3).to_string())
 
 
 # ==================================================
-# 7. DISPLAY PREPARED DATA
+# 8. DISPLAY PREPARED DATA
 # ==================================================
 
 def display_prepared_data(data):
@@ -304,7 +372,7 @@ def display_prepared_data(data):
         elif isinstance(values, pd.Series):
 
             print(f"\n{name}: {values.shape}")
-            print(values.value_counts())
+            print(values.value_counts().to_string())
 
         else:
 
@@ -317,34 +385,34 @@ def display_prepared_data(data):
 
 if __name__ == "__main__":
 
-    # Load dataset
     df = load_dataset()
 
-    # Create partitions
-    (
-        reference_df,
-        calibration_df,
-        evaluation_df
-    ) = split_dataset(df)
+    partitions = split_dataset(df)
 
-    # Prepare features and labels
     data = prepare_data()
 
-    # Display temporal diagnostics
     display_temporal_diagnostics(
-        reference_df,
-        calibration_df,
-        evaluation_df,
+        partitions,
         data["target_median"]
     )
 
-    # Compare reference and calibration distributions
-    compare_feature_distributions(
-        reference_df,
-        calibration_df
+    compare_feature_distributions(partitions)
+
+    display_prepared_data(data)
+
+    cal_batches = sample_batches(
+        data["X_calibration"],
+        data["y_calibration"],
+        n_batches=100
     )
 
-    # Display final prepared data
-    display_prepared_data(data)
+    eval_batches = chronological_batches(
+        data["X_evaluation"],
+        data["y_evaluation"]
+    )
+
+    print("\n========== BATCHING ==========")
+    print("Calibration batches:", len(cal_batches), "x", len(cal_batches[0][0]), "rows")
+    print("Natural evaluation batches:", len(eval_batches), "x", len(eval_batches[0][0]), "rows")
 
     print("\n========== INSPECTION COMPLETE ==========")
