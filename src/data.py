@@ -12,10 +12,11 @@ Partitions (all splits are by whole dates, never by rows):
                                          (demand grows strongly in 2012);
                                          used only as a separate real-drift check
 
-Within the pool, dates are grouped into 7-day blocks and each calendar month
-is split separately (stratified), so reference, calibration and stable_test
-all cover the same seasons. Blocks (not single days) are used so neighbouring
-days with near-identical weather do not leak between partitions.
+Within the pool, dates are grouped into 3-day blocks inside each calendar
+month and each month is split separately (stratified), so reference,
+calibration and stable_test all cover the same months and seasons. Blocks
+(not single days) are used so neighbouring days with near-identical weather
+do not leak between partitions.
 """
 
 import numpy as np
@@ -35,7 +36,7 @@ RANDOM_STATE = 42
 HISTORICAL_RATIO = 0.60     # share of dates in the historical pool
 CALIBRATION_RATIO = 0.20    # share of the pool used for calibration
 STABLE_TEST_RATIO = 0.20    # share of the pool used as stable test
-BLOCK_DAYS = 7              # block length used when splitting the pool
+BLOCK_DAYS = 3              # block length (days, inside one calendar month) used when splitting the pool
 
 BATCH_SIZE = 500            # rows per monitoring batch
 
@@ -106,45 +107,50 @@ def split_dataset(df):
     pool_dates = dates.iloc[:pool_end]
     natural_dates = dates.iloc[pool_end:]
 
-    # ---- group pool dates into 7-day blocks ----
+    # ---- group pool dates into short blocks INSIDE each calendar month ----
+    # (blocks never straddle a month boundary, so month shares stay exact)
     blocks = pd.DataFrame({"date": pool_dates})
 
-    blocks["block"] = (
-        (blocks["date"] - blocks["date"].iloc[0]).dt.days
-        // BLOCK_DAYS
-    )
+    blocks["month_key"] = blocks["date"].dt.to_period("M")
 
-    block_info = (
-        blocks.groupby("block")["date"]
-        .min()
-        .dt.to_period("M")
-        .rename("month_key")
-        .reset_index()
+    blocks["block"] = (
+        blocks["month_key"].astype(str)
+        + "-"
+        + ((blocks["date"].dt.day - 1) // BLOCK_DAYS).astype(str)
     )
 
     # ---- split each month's blocks (stratified by month) ----
+    # Blocks are visited in random order and each goes to the partition that
+    # is furthest below its target share of that month's days.
     rng = np.random.default_rng(RANDOM_STATE)
+
+    targets = {
+        "reference": 1.0 - CALIBRATION_RATIO - STABLE_TEST_RATIO,
+        "calibration": CALIBRATION_RATIO,
+        "stable_test": STABLE_TEST_RATIO
+    }
 
     block_partition = {}
 
-    for _, month_blocks in block_info.groupby("month_key"):
+    for _, month in blocks.groupby("month_key"):
 
-        block_ids = rng.permutation(
-            sorted(month_blocks["block"].tolist())
-        )
+        block_days = month.groupby("block").size()
 
-        n = len(block_ids)
-        n_cal = int(round(n * CALIBRATION_RATIO))
-        n_test = int(round(n * STABLE_TEST_RATIO))
+        month_days = block_days.sum()
 
-        for block_id in block_ids[:n_cal]:
-            block_partition[block_id] = "calibration"
+        assigned = {name: 0 for name in targets}
 
-        for block_id in block_ids[n_cal:n_cal + n_test]:
-            block_partition[block_id] = "stable_test"
+        for block_id in rng.permutation(block_days.index.to_numpy()):
 
-        for block_id in block_ids[n_cal + n_test:]:
-            block_partition[block_id] = "reference"
+            deficit = {
+                name: targets[name] * month_days - assigned[name]
+                for name in targets
+            }
+
+            chosen = max(deficit, key=deficit.get)
+
+            block_partition[block_id] = chosen
+            assigned[chosen] += block_days[block_id]
 
     blocks["partition"] = blocks["block"].map(block_partition)
 

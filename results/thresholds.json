@@ -1,0 +1,24 @@
+{
+  "thresholds": {
+    "psi": {
+      "threshold": 0.08539377944306724,
+      "target_far": 0.05,
+      "n_batches": 300,
+      "batch_size": 500,
+      "stable_score_mean": 0.05900993167237137,
+      "stable_score_std": 0.016655177053647264
+    },
+    "ks": {
+      "threshold": 0.10850602409638554,
+      "target_far": 0.05,
+      "n_batches": 300,
+      "batch_size": 500,
+      "stable_score_mean": 0.08312489959839356,
+      "stable_score_std": 0.014401803772583547
+    }
+  },
+  "achieved_false_alarm_rate": {
+    "psi": 0.03333333333333333,
+    "ks": 0.06333333333333334
+  }
+}

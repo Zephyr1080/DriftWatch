@@ -1,34 +1,3 @@
-"""
-DriftWatch - threshold calibration (src/calibration.py)
-
-PSI and KS live on different scales, and even with NO drift both give scores
-above zero because of sampling noise. So we cannot compare them with textbook
-cut-offs (like PSI > 0.2). Instead each detector gets its own threshold, set so
-that both false-alarm on about the same share of stable batches (5% by default).
-
-Method
-    1. Draw many batches from the CALIBRATION partition (stable data).
-    2. Score each batch against the reference data with the detector.
-    3. Threshold = the (1 - target_far) percentile of those scores.
-       An alert fires when score > threshold.
-
-Which stable data is used (important)
-    There are only about 175 stable days (calibration + stable_test). Batches of
-    500 rows drawn from one fixed set of days all share that set's day-level
-    make-up, which differs a little from the reference days. That shared offset
-    is bigger than batch-to-batch noise. So thresholds calibrated on one set
-    of days can give a very different false-alarm rate on ANOTHER set of days
-    (see the cross-set diagnostic below: it can be 0% or 90%).
-
-    For a fair PSI-vs-KS comparison the thresholds must be matched on the data
-    the experiments actually monitor. So calibration uses the whole stable pool
-    (calibration + stable_test), and the experiments draw their clean and
-    drifted batches from the same pool. The achieved false-alarm rate is then
-    measured on fresh batches from that pool. Rows are reused between batches,
-    so treat this as a controlled demonstration, not as proof of the false-alarm
-    rate on brand-new days. State this limitation in the findings.
-"""
-
 import json
 from pathlib import Path
 

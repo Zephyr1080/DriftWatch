@@ -8,3 +8,4 @@ streamlit
 plotly
 pytest
 jupyter
+matplotlib
