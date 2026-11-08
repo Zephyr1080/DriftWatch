@@ -32,16 +32,17 @@ Feature drift and model performance degradation are evaluated separately: a chan
 
 ## Current Status
 
-**In progress — initial data preparation**
+**In progress: comparative experiments and analysis**
 
 - [x] Dataset downloaded and inspected.
 - [x] Feature selection and target definition established.
-- [x] Reference, calibration, and natural-evaluation split implemented.
+- [x] Reference, calibration, stable-test, and natural-evaluation splits implemented.
 - [x] Initial data diagnostics implemented.
-- [ ] Baseline model training (Random Forest, SVM, Logistic Regression).
-- [ ] Drift simulation.
-- [ ] PSI and KS detector implementation.
-- [ ] Threshold calibration and comparative experiments.
+- [x] Baseline model training (Random Forest, SVM, Logistic Regression).
+- [x] Drift simulation (covariate shift, hour shift, noise, missing values).
+- [x] PSI and KS detector implementation.
+- [x] Threshold calibration.
+- [ ] Comparative experiments (script written; full run and analysis in progress).
 - [ ] Monitoring pipeline, alerts, and Streamlit dashboard.
 - [ ] Testing and final evaluation.
 
